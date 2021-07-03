@@ -6,7 +6,7 @@ export LDFLAGS := -lSDL2
 
 
 export TARGET_BINARY := rp
-export OBJ := main.o render.o volk.o
+export OBJ := main.o render.o volk.o vma.o
 export SHADER_OBJ := 
 
 
