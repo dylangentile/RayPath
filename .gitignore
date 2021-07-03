@@ -1,0 +1,11 @@
+[Bb]uild/
+*.o
+[Ll]ogs/
+[Ll]og/
+*.log
+.DS_Store
+*.spv
+.depend
+*.dll
+*.ini
+*.lib
