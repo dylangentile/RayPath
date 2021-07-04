@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <vector>
 #include <set>
 
@@ -13,6 +14,26 @@ Renderer::~Renderer(){}
 
 
 #define CHECKVK(expr, msg) if((expr) != VK_SUCCESS){fprintf(stderr, "%s:%d - %s\n", __FILE__, __LINE__, msg); exit(1);}
+
+//for shaders
+void*
+read_binary(const char* path, size_t* size)
+{
+	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	std::streamsize fsize = file.tellg();
+	*size = (size_t)fsize;
+
+	void* data = calloc(1, *size);
+	file.seekg(0, std::ios::beg);
+	if (!file.read((char*)data, fsize))
+	{
+		free(data);
+		return nullptr;
+	}
+
+	return data;
+}
+
 
 void
 Renderer::create_instance()
@@ -84,10 +105,13 @@ Renderer::choose_pdev()
 
 }
 
+
+//this function is atrociously bad but it's not a huge deal that it works well
 void 
 Renderer::choose_queue_families()
 {
 	//ideally we have 1 compute queue, and 1 transfer queue
+	// -- NVIDIA cards have dedicated transfer queues that are better than the compute & graphics & transfer queue families
 	std::vector<VkQueueFamilyProperties> q_props_vec;
 	
 	uint32_t family_count;
@@ -138,12 +162,12 @@ Renderer::choose_queue_families()
 				m_c_queue_idx = c_it;
 				m_t_queue_idx = c_it;
 				found_t = true;
-				break;
+				return;
 			}
 		}
 	}
-	else 
-		m_c_queue_idx = *compute_capable.begin();
+	
+	m_c_queue_idx = *compute_capable.begin();
 
 
 
@@ -159,6 +183,8 @@ Renderer::choose_queue_families()
 				break;
 			}
 		}
+
+		
 	}
 
 	if(!found_t)
@@ -259,6 +285,170 @@ Renderer::create_allocator()
 }
 
 
+void 
+Renderer::create_command_pools()
+{
+	VkCommandPoolCreateInfo pool_cinfo;
+	pool_cinfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+	pool_cinfo.pNext = nullptr;
+	pool_cinfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+	pool_cinfo.queueFamilyIndex = m_c_queue_idx;
+
+	CHECKVK(vkCreateCommandPool(m_dev, &pool_cinfo, nullptr, &m_c_cmd_pool), 
+		"failed to create compute command pool!");
+
+	pool_cinfo.flags = 0;
+	pool_cinfo.queueFamilyIndex = m_t_queue_idx;
+
+	CHECKVK(vkCreateCommandPool(m_dev, &pool_cinfo, nullptr, &m_t_cmd_pool), 
+		"failed to create transfer command pool!");
+
+}
+
+void 
+Renderer::create_command_buffers()
+{
+	VkCommandBufferAllocateInfo alloc_info;
+	alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	alloc_info.pNext = nullptr;
+	alloc_info.commandPool = m_c_cmd_pool;
+	alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	alloc_info.commandBufferCount = 2;
+
+
+	CHECKVK(vkAllocateCommandBuffers(m_dev, &alloc_info, m_c_cmd_buf_array),
+		"failed to allocate compute command buffers!");
+	
+	alloc_info.commandPool = m_t_cmd_pool;
+	alloc_info.commandBufferCount = 1;
+
+	CHECKVK(vkAllocateCommandBuffers(m_dev, &alloc_info, &m_t_cmd_buf),
+		"failed to allocate transfer command buffer!");
+
+}
+
+
+void 
+Renderer::create_pipeline()
+{
+	const size_t pool_size_array_size = 2;
+	VkDescriptorPoolSize pool_size_array[pool_size_array_size];
+
+	pool_size_array[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	pool_size_array[0].descriptorCount = 4;
+
+	pool_size_array[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	pool_size_array[1].descriptorCount = 2;
+
+
+	VkDescriptorPoolCreateInfo pool_cinfo;
+	pool_cinfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	pool_cinfo.pNext = nullptr;
+	pool_cinfo.flags = 0;
+	pool_cinfo.maxSets = 2;
+	pool_cinfo.poolSizeCount = pool_size_array_size;
+	pool_cinfo.pPoolSizes = pool_size_array;	
+
+
+	CHECKVK(vkCreateDescriptorPool(m_dev, &pool_cinfo, nullptr, &m_descriptor_pool), 
+		"failed to create descriptor pool!");
+
+
+
+
+	const size_t binding_array_size = 3;
+	VkDescriptorSetLayoutBinding binding_array[binding_array_size];
+	
+	binding_array[0].binding = 0;
+	binding_array[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	binding_array[0].descriptorCount = 1;
+	binding_array[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	binding_array[0].pImmutableSamplers = nullptr;
+
+	binding_array[1].binding = 1;
+	binding_array[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	binding_array[1].descriptorCount = 1;
+	binding_array[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	binding_array[1].pImmutableSamplers = nullptr;
+
+	binding_array[2].binding = 2;
+	binding_array[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	binding_array[2].descriptorCount = 1;
+	binding_array[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	binding_array[2].pImmutableSamplers = nullptr;
+
+	VkDescriptorSetLayoutCreateInfo dset_layout_cinfo;
+	dset_layout_cinfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	dset_layout_cinfo.pNext = nullptr;
+	dset_layout_cinfo.flags = 0;
+	dset_layout_cinfo.bindingCount = binding_array_size;
+	dset_layout_cinfo.pBindings = binding_array;
+
+
+	CHECKVK(vkCreateDescriptorSetLayout(m_dev, &dset_layout_cinfo, nullptr, &m_dset_layout),
+		"failed to create descriptor set layout!");
+
+
+
+
+	VkPipelineLayoutCreateInfo layout_cinfo;
+	layout_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	layout_cinfo.pNext = nullptr;
+	layout_cinfo.flags = 0;
+	layout_cinfo.setLayoutCount = 1;
+	layout_cinfo.pSetLayouts = &m_dset_layout;
+	layout_cinfo.pushConstantRangeCount = 0;
+	layout_cinfo.pPushConstantRanges = nullptr;
+
+	CHECKVK(vkCreatePipelineLayout(m_dev, &layout_cinfo, nullptr, &m_pipeline_layout),
+		"failed to create pipeline layout");
+
+
+	size_t shader_code_size;
+	void* shader_code = read_binary("path.comp.spv", &shader_code_size);
+	if(shader_code == nullptr)
+	{
+		fprintf(stderr, "failed to read shader binary from disk!\n");
+		exit(1);
+	}
+
+	VkShaderModuleCreateInfo shader_module_cinfo;
+	shader_module_cinfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	shader_module_cinfo.pNext = nullptr;
+	shader_module_cinfo.flags = 0;
+	shader_module_cinfo.codeSize = shader_code_size;
+	shader_module_cinfo.pCode = (uint32_t*)shader_code; //glslangValidator produces 4 byte aligned binaries, and the binary reader will read exactly that, so no problem
+
+	VkShaderModule shader_module;
+	CHECKVK(vkCreateShaderModule(m_dev, &shader_module_cinfo, nullptr, &shader_module),
+		"failed to create shader module!");
+
+
+	VkPipelineShaderStageCreateInfo shader_stage_cinfo;
+	shader_stage_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	shader_stage_cinfo.pNext = nullptr;
+	shader_stage_cinfo.flags = 0;
+	shader_stage_cinfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	shader_stage_cinfo.module = shader_module;
+	shader_stage_cinfo.pName = "main";
+	shader_stage_cinfo.pSpecializationInfo = nullptr;
+
+
+
+	VkComputePipelineCreateInfo pipe_cinfo;
+	pipe_cinfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+	pipe_cinfo.pNext = nullptr;
+	pipe_cinfo.flags = 0;
+	pipe_cinfo.stage = shader_stage_cinfo;
+	pipe_cinfo.layout = m_pipeline_layout;
+	pipe_cinfo.basePipelineHandle = VK_NULL_HANDLE;
+	pipe_cinfo.basePipelineIndex = 0;
+
+	CHECKVK(vkCreateComputePipelines(m_dev, VK_NULL_HANDLE, 1, &pipe_cinfo, nullptr, &m_compute_pipeline),
+		"failed to create compute pipeline!");
+
+}
+
 
 void
 Renderer::init()
@@ -268,7 +458,9 @@ Renderer::init()
 	choose_queue_families();
 	create_device();
 	create_allocator();
-
+	create_command_pools();
+	create_command_buffers();
+	create_pipeline();
 }
 
 
@@ -277,6 +469,10 @@ void
 Renderer::quit()
 {
 
+
+	vkDestroyCommandPool(m_dev, m_t_cmd_pool, nullptr);
+	vkDestroyCommandPool(m_dev, m_c_cmd_pool, nullptr);
+	vmaDestroyAllocator(m_vma);
 	vkDestroyDevice(m_dev, nullptr);
 	vkDestroyInstance(m_instance, nullptr);
 	//no cleanup for volk
@@ -286,5 +482,98 @@ Renderer::quit()
 void
 Renderer::render_frame()
 {
+
+}
+
+
+
+
+bool 
+Renderer::create_buffer(Buffer* buf, const size_t size)
+{
+	VkBufferCreateInfo buf_cinfo;
+	buf_cinfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	buf_cinfo.pNext = nullptr;
+	buf_cinfo.flags = 0; 
+	buf_cinfo.size = size;
+	buf_cinfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT; 
+	buf_cinfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	buf_cinfo.queueFamilyIndexCount = 0;
+	buf_cinfo.pQueueFamilyIndices = nullptr;
+
+	VmaAllocationCreateInfo ainfo = {};
+	ainfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+	buf->size = size;
+
+	return vmaCreateBuffer(m_vma, &buf_cinfo, &ainfo, &buf->handle, &buf->alloc, nullptr) == VK_SUCCESS;
+}
+
+void 
+Renderer::destroy_buffer(Buffer* buf)
+{
+	vmaDestroyBuffer(m_vma, buf->handle, buf->alloc);
+}
+
+
+bool
+Renderer::copy_to_buffer(VkCommandBuffer cmd_buf, Buffer* buf, const void* data, const size_t size)
+{
+	if(size > buf->size)
+		return false;
+
+
+	Buffer staging_buf;
+
+	VkBufferCreateInfo buf_cinfo;
+	buf_cinfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	buf_cinfo.pNext = nullptr;
+	buf_cinfo.flags = 0; 
+	buf_cinfo.size = size;
+	buf_cinfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT; 
+	buf_cinfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	buf_cinfo.queueFamilyIndexCount = 0;
+	buf_cinfo.pQueueFamilyIndices = nullptr;
+
+	VmaAllocationCreateInfo ainfo = {};
+	ainfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+
+
+	if(vmaCreateBuffer(m_vma, &buf_cinfo, &ainfo, &staging_buf.handle, &staging_buf.alloc, nullptr) != VK_SUCCESS)
+		return false;
+
+	{
+		void* memory;
+		vmaMapMemory(m_vma, staging_buf.alloc, &memory);
+			memcpy(memory, data, size);
+		vmaUnmapMemory(m_vma, staging_buf.alloc);
+	}
+
+	//transfer ownership from compute queue to transfer queue
+	VkBufferMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	barrier.srcQueueFamilyIndex = m_c_queue_idx;
+	barrier.dstQueueFamilyIndex = m_t_queue_idx;
+	barrier.buffer = buf->handle;
+	barrier.size = VK_WHOLE_SIZE;
+
+	vkCmdPipelineBarrier(cmd_buf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+
+	VkBufferCopy copy_region;
+	copy_region.srcOffset = 0;
+	copy_region.dstOffset = 0;
+	copy_region.size = size;
+
+	vkCmdCopyBuffer(cmd_buf, staging_buf.handle, buf->handle, 1, &copy_region);
+
+
+	//transfer ownership back to compute queue
+	barrier.srcQueueFamilyIndex = m_t_queue_idx;
+	barrier.dstQueueFamilyIndex = m_c_queue_idx;
+
+	vkCmdPipelineBarrier(cmd_buf, VK_PIPELINE_STAGE_TRANSFER_BIT,  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+
+	m_destroy_after_transfer_vec.push_back(staging_buf);
+	return true;
 
 }
